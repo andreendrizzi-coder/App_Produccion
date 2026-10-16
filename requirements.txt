@@ -1,0 +1,7 @@
+streamlit
+pandas
+pymssql
+matplotlib
+numpy
+fpdf
+pytz
