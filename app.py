@@ -34,7 +34,7 @@ if btn_generar:
             # ---------------------------------------------------------
             # CONEXIÓN A BASE DE DATOS (Usando secretos de Streamlit)
             # ---------------------------------------------------------
-              conexion = pymssql.connect(
+            conexion = pymssql.connect(
                   server=st.secrets["WIIDEM_SERVER"], 
                   user=st.secrets["WIIDEM_USER"], 
                   password=st.secrets["WIIDEM_PASS"], 
@@ -43,7 +43,7 @@ if btn_generar:
               )
 
             # Consultas SQL
-            query_total_grupo = f"SELECT AVG(Oee) AS OEE, AVG(Availability) AS DISPONIBILIDAD, AVG(Performance) AS PERFORMANCE, AVG(Quality) AS CALIDAD FROM PROD_D_05 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Factory = '4'"
+            query_total_grupo =f"SELECT AVG(Oee) AS OEE, AVG(Availability) AS DISPONIBILIDAD, AVG(Performance) AS PERFORMANCE, AVG(Quality) AS CALIDAD FROM PROD_D_05 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Factory = '4'"
             df_total_grupo = pd.read_sql(query_total_grupo, conexion)
 
             query_oee = f"SELECT Cell AS MAQUINA, AVG(Oee) AS OEE, AVG(Availability) AS DISPONIBILIDAD, AVG(Performance) AS PERFORMANCE, AVG(Quality) AS CALIDAD FROM PROD_D_03 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Cell LIKE 'CEL%' GROUP BY Cell ORDER BY Cell"
