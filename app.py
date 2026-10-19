@@ -30,8 +30,15 @@ btn_generar = st.button("🚀 Generar Reporte PDF", use_container_width=True, ty
 if btn_generar:
     FECHA_INICIO = fecha_inicio_ui.strftime('%Y-%m-%d')
     FECHA_FIN = fecha_fin_ui.strftime('%Y-%m-%d')
+    
+    # ---------------------------------------------------------
+    # LÓGICA DINÁMICA DE RANGO DE FECHAS
+    # ---------------------------------------------------------
+    d1 = datetime.strptime(FECHA_INICIO, '%Y-%m-%d')
+    d2 = datetime.strptime(FECHA_FIN, '%Y-%m-%d')
+    dias_diferencia = (d2 - d1).days
 
-    with st.spinner('Extrayendo datos de Wiidem y construyendo el PDF. Por favor espere...'):
+    with st.spinner(f'Extrayendo datos de Wiidem para {dias_diferencia + 1} días. Construyendo el PDF...'):
         try:
             # ---------------------------------------------------------
             # CONEXIÓN SQL
@@ -44,11 +51,11 @@ if btn_generar:
                 login_timeout=15
             )
 
-            # EXTRACCIÓN DE OEE PONDERADO EXACTO (Evita el promedio simple)
-            query_total_grupo = f"SELECT SUM(Oee * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS OEE, SUM(Availability * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS DISPONIBILIDAD, SUM(Performance * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS PERFORMANCE, SUM(Quality * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS CALIDAD FROM PROD_D_05 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND (Factory = '4' OR FactoryId = 4)"
+            # EXTRACCIÓN DEL OEE GLOBAL EXACTO DESDE WIIDEM (PROMEDIO PURO)
+            query_total_grupo = f"SELECT AVG(Oee) AS OEE, AVG(Availability) AS DISPONIBILIDAD, AVG(Performance) AS PERFORMANCE, AVG(Quality) AS CALIDAD FROM PROD_D_05 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Factory = '4'"
             df_total_grupo = pd.read_sql(query_total_grupo, conexion)
 
-            query_oee = f"SELECT Cell AS MAQUINA, SUM(Oee * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS OEE, SUM(Availability * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS DISPONIBILIDAD, SUM(Performance * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS PERFORMANCE, SUM(Quality * (ProductiveTime + DownTime)) / NULLIF(SUM(ProductiveTime + DownTime), 0) AS CALIDAD FROM PROD_D_03 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Cell LIKE 'CEL%' GROUP BY Cell ORDER BY Cell"
+            query_oee = f"SELECT Cell AS MAQUINA, AVG(Oee) AS OEE, AVG(Availability) AS DISPONIBILIDAD, AVG(Performance) AS PERFORMANCE, AVG(Quality) AS CALIDAD FROM PROD_D_03 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Cell LIKE 'CEL%' GROUP BY Cell ORDER BY Cell"
             df_oee = pd.read_sql(query_oee, conexion)
             
             query_prod_diaria = f"SELECT CAST(Date AS DATE) AS FECHA, Cell AS MAQUINA, Turn AS TURNO, ProductiveTime AS PRODUCTIVO, DownTime AS PARADA FROM PROD_D_02 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Cell LIKE 'CEL%'"
@@ -66,7 +73,12 @@ if btn_generar:
             query_top_fallas = f"SELECT TOP 15 CASE WHEN COALESCE(et3.Name, et2.Name, et1.Name) = 'NAVE NUEVA' AND e.Cell = 'CEL06' THEN 'Celdas Panasonic' WHEN COALESCE(et3.Name, et2.Name, et1.Name) = 'NAVE NUEVA' THEN 'Celdas KUKA' ELSE COALESCE(et3.Name, et2.Name, et1.Name) END AS NombreFalla, et1.Name AS CategoriaPadre, SUM(e.Interval) AS MinutosPerdidos FROM EVENT_01 e LEFT JOIN EventType et1 ON e.EventTypeLevel1 = et1.EventTypeId LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId LEFT JOIN EventType et3 ON e.EventTypeLevel3 = et3.EventTypeId WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%' AND (et1.Name LIKE '%FALLA%' OR et1.Name LIKE '%GESTION%' OR et1.Name LIKE '%CALIDAD%') AND COALESCE(et2.Name, '') NOT LIKE '%REFRIGERIO%' AND COALESCE(et2.Name, '') NOT LIKE '%BAÑO%' AND COALESCE(et2.Name, '') NOT LIKE '%DESCANSO%' GROUP BY CASE WHEN COALESCE(et3.Name, et2.Name, et1.Name) = 'NAVE NUEVA' AND e.Cell = 'CEL06' THEN 'Celdas Panasonic' WHEN COALESCE(et3.Name, et2.Name, et1.Name) = 'NAVE NUEVA' THEN 'Celdas KUKA' ELSE COALESCE(et3.Name, et2.Name, et1.Name) END, et1.Name ORDER BY MinutosPerdidos DESC"
             df_top_fallas = pd.read_sql(query_top_fallas, conexion)
 
-            query_tendencia = f"SELECT e.Cell AS MAQUINA, DATEPART(HOUR, e.Started) AS HORA, SUM(e.Interval) AS MinutosPerdidos FROM EVENT_01 e LEFT JOIN EventType et1 ON e.EventTypeLevel1 = et1.EventTypeId LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%' AND (et1.Name LIKE '%FALLA%' OR et1.Name LIKE '%GESTION%' OR et1.Name LIKE '%CALIDAD%') AND COALESCE(et2.Name, '') NOT LIKE '%REFRIGERIO%' AND COALESCE(et2.Name, '') NOT LIKE '%BAÑO%' GROUP BY e.Cell, DATEPART(HOUR, e.Started) ORDER BY HORA"
+            # LÓGICA DINÁMICA DE TENDENCIAS
+            if dias_diferencia > 3:
+                query_tendencia = f"SELECT e.Cell AS MAQUINA, CAST(e.Started AS DATE) AS EJE_X, SUM(e.Interval) AS MinutosPerdidos FROM EVENT_01 e LEFT JOIN EventType et1 ON e.EventTypeLevel1 = et1.EventTypeId LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%' AND (et1.Name LIKE '%FALLA%' OR et1.Name LIKE '%GESTION%' OR et1.Name LIKE '%CALIDAD%') AND COALESCE(et2.Name, '') NOT LIKE '%REFRIGERIO%' AND COALESCE(et2.Name, '') NOT LIKE '%BAÑO%' GROUP BY e.Cell, CAST(e.Started AS DATE) ORDER BY EJE_X"
+            else:
+                query_tendencia = f"SELECT e.Cell AS MAQUINA, DATEPART(HOUR, e.Started) AS EJE_X, SUM(e.Interval) AS MinutosPerdidos FROM EVENT_01 e LEFT JOIN EventType et1 ON e.EventTypeLevel1 = et1.EventTypeId LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%' AND (et1.Name LIKE '%FALLA%' OR et1.Name LIKE '%GESTION%' OR et1.Name LIKE '%CALIDAD%') AND COALESCE(et2.Name, '') NOT LIKE '%REFRIGERIO%' AND COALESCE(et2.Name, '') NOT LIKE '%BAÑO%' GROUP BY e.Cell, DATEPART(HOUR, e.Started) ORDER BY EJE_X"
+            
             df_tendencia = pd.read_sql(query_tendencia, conexion)
 
             query_resumen_maq = f"SELECT e.Cell AS MAQUINA, UPPER(et1.Name) AS CategoriaPadre, UPPER(et2.Name) AS CategoriaHijo, SUM(e.Interval) AS MinutosTotales FROM EVENT_01 e LEFT JOIN EventType et1 ON e.EventTypeLevel1 = et1.EventTypeId LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%' GROUP BY e.Cell, et1.Name, et2.Name"
@@ -81,26 +93,26 @@ if btn_generar:
             query_top_prod = f"WITH ProductoRankeado AS (SELECT Cell AS MAQUINA, Code AS CODIGO_PRODUCTO, SUM(Good) AS BUENAS, SUM(Rework) AS RETRABAJO, SUM(Scrap) AS OBSERVADAS, SUM(Good + Rework + Scrap) AS TOTAL_PRODUCIDO, AVG(CycleTime) AS TC, ROW_NUMBER() OVER(PARTITION BY Cell ORDER BY SUM(Good + Rework + Scrap) DESC) as RankProd FROM PROD_D_01 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' AND Cell LIKE 'CEL%' GROUP BY Cell, Code) SELECT * FROM ProductoRankeado WHERE RankProd <= 5"
             df_top_prod = pd.read_sql(query_top_prod, conexion)
             
-            # CONSULTA PERFORMANCE: Filtrado exclusivo para Planta 4 (Fumiscor) / Celdas Renault
-            query_perf_operarios = f"""
-            SELECT 
-                o.Operator AS Operador, 
-                'Planta 4 (Fumiscor)' AS Fabrica, 
-                (SELECT STRING_AGG(DISTINCT e.Cell, ', ') FROM EVENT_OPERATOR_01 eo JOIN EVENT_01 e ON eo.EventId = e.Id WHERE eo.OperatorId = o.OperatorId AND e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%') AS MaquinasOperadas, 
-                AVG(o.Performance) AS Perf 
-            FROM OPER_D_01 o 
-            LEFT JOIN Factory f ON o.FactoryId = f.FactoryId 
-            WHERE o.Date >= '{FECHA_INICIO}' AND o.Date <= '{FECHA_FIN}' 
-            AND (o.FactoryId = 4 OR f.Name LIKE '%Planta 4%' OR f.Name LIKE '%Fumiscor%')
-            GROUP BY o.OperatorId, o.Operator, f.Name 
-            ORDER BY Perf DESC
-            """
-            try: 
-                df_perf_operarios = pd.read_sql(query_perf_operarios, conexion)
-            except: 
+            # --- PERFORMANCE Y OPERADORES (Cruce con Pandas para robustez) ---
+            query_perf_basica = f"SELECT OperatorId, Operator AS Operador, AVG(Performance) AS Perf FROM OPER_D_01 WHERE Date >= '{FECHA_INICIO}' AND Date <= '{FECHA_FIN}' GROUP BY OperatorId, Operator"
+            query_maq_operadas = f"SELECT DISTINCT eo.OperatorId, e.Cell FROM EVENT_OPERATOR_01 eo JOIN EVENT_01 e ON eo.EventId = e.Id WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' AND e.Cell LIKE 'CEL%'"
+            
+            try:
+                df_perf_basica = pd.read_sql(query_perf_basica, conexion)
+                df_maq_operadas = pd.read_sql(query_maq_operadas, conexion)
+                
+                if not df_perf_basica.empty and not df_maq_operadas.empty:
+                    df_maq_agrupadas = df_maq_operadas.groupby('OperatorId')['Cell'].apply(lambda x: ', '.join(x.dropna().unique())).reset_index()
+                    df_maq_agrupadas.rename(columns={'Cell': 'MaquinasOperadas'}, inplace=True)
+                    df_perf_operarios = pd.merge(df_perf_basica, df_maq_agrupadas, on='OperatorId', how='inner')
+                    df_perf_operarios['Fabrica'] = 'Planta 4 (Fumiscor)'
+                    df_perf_operarios = df_perf_operarios.sort_values(by='Perf', ascending=False)
+                else:
+                    df_perf_operarios = pd.DataFrame()
+            except:
                 df_perf_operarios = pd.DataFrame()
 
-            # CONSULTA DESCANSOS: Filtrado exclusivo para eventos en máquinas de Celdas Renault (CEL%)
+            # CONSULTA DESCANSOS
             query_descansos_operarios = f"""
             SELECT 
                 op.Name AS Operador, 
@@ -113,7 +125,7 @@ if btn_generar:
             JOIN Operator op ON eo.OperatorId = op.OperatorId 
             LEFT JOIN EventType et2 ON e.EventTypeLevel2 = et2.EventTypeId 
             WHERE e.Started >= '{FECHA_INICIO}' AND e.Started <= '{FECHA_FIN} 23:59:59' 
-            AND e.Cell LIKE 'CEL%'
+            AND e.Cell LIKE 'CEL%' 
             AND UPPER(et2.Name) IN ('BAÑO', 'REFRIGERIO') 
             GROUP BY op.Name, UPPER(et2.Name) 
             ORDER BY TotalMin DESC
@@ -128,7 +140,7 @@ if btn_generar:
             conexion.close() 
 
             # ---------------------------------------------------------
-            # PROCESAMIENTO
+            # PROCESAMIENTO MATEMÁTICO Y DE DATOS
             # ---------------------------------------------------------
             def formatear_nombre_maq(nombre): 
                 return str(nombre).replace('CELDA ', 'Celda 0').replace('CEL', 'Celda ') + ' Fumis'
@@ -157,6 +169,7 @@ if btn_generar:
 
             df_oee['MAQUINA'] = df_oee['MAQUINA'].apply(formatear_nombre_maq)
             cols_kpi = ['OEE', 'DISPONIBILIDAD', 'PERFORMANCE', 'CALIDAD']
+            
             for col in cols_kpi: 
                 df_oee[col] = pd.to_numeric(df_oee[col], errors='coerce').fillna(0.0)
             
@@ -184,6 +197,7 @@ if btn_generar:
                 df_prod_diaria['FECHA'] = pd.to_datetime(df_prod_diaria['FECHA'])
                 df_horarios_diarios['FECHA'] = pd.to_datetime(df_horarios_diarios['FECHA'])
                 df_diario = pd.merge(df_prod_diaria, df_horarios_diarios, on=['FECHA', 'MAQUINA', 'TURNO'], how='left')
+                
                 df_diario['MAQUINA'] = df_diario['MAQUINA'].apply(formatear_nombre_maq)
                 df_diario['MIN_APERTURA_NETA'] = df_diario['PRODUCTIVO'].fillna(0) + df_diario['PARADA'].fillna(0)
                 
@@ -199,7 +213,7 @@ if btn_generar:
                 df_turnos = df_diario.groupby(['TURNO', 'MAQUINA']).agg({'INICIO_MIN': 'median', 'CIERRE_MIN': 'median', 'MIN_APERTURA_NETA': 'mean'}).reset_index()
                 
                 def format_hora_habitual(mins): 
-                    if pd.isna(mins):
+                    if pd.isna(mins): 
                         return "-"
                     return f"{int(mins // 60) % 24:02d}:{int(mins % 60):02d}"
                 
@@ -247,7 +261,7 @@ if btn_generar:
                         resumen_maq_dict[m]['Produccion'] += mins
                     elif 'PARADA PROGRAMADA' in cat: 
                         resumen_maq_dict[m]['ParadaProg'] += mins
-                    elif 'PROYECTO' not in cat and 'PROYECTO' not in subcat and cat != 'NONE' and cat != 'NAN':
+                    elif 'PROYECTO' not in cat and 'PROYECTO' not in subcat and cat != 'NONE' and cat != 'NAN': 
                         resumen_maq_dict[m]['Fallas'] += mins
 
             top3_dict = {}
@@ -270,7 +284,7 @@ if btn_generar:
                     nivel2 = str(row['Nivel2']).upper()
                     mins = float(row['Minutos']) if not pd.isna(row['Minutos']) else 0.0
                     
-                    if maq not in areas_dt_dict:
+                    if maq not in areas_dt_dict: 
                         areas_dt_dict[maq] = {'MANTEN.': 0, 'DISPOSIT.': 0, 'TECNOL.': 0, 'LOGIST.': 0, 'GESTION': 0, 'CALIDAD': 0}
                     
                     if 'FALLA' in nivel1:
@@ -292,7 +306,7 @@ if btn_generar:
                         areas_dt_dict[maq]['GESTION'] += mins
                     elif 'CALIDAD' in nivel1: 
                         areas_dt_dict[maq]['CALIDAD'] += mins
-                    else:
+                    else: 
                         areas_dt_dict[maq]['MANTEN.'] += mins 
 
             if not df_top_prod.empty: 
@@ -308,6 +322,7 @@ if btn_generar:
                     x = np.arange(len(cols_kpi))
                     width = 0.8 / len(maquinas)
                     colores = plt.cm.tab20(np.linspace(0, 1, len(maquinas)))
+                    
                     for i, maquina in enumerate(maquinas):
                         valores = df_oee[df_oee['MAQUINA'] == maquina][cols_kpi].values[0]
                         offset = (i - len(maquinas)/2) * width + width/2
@@ -319,9 +334,11 @@ if btn_generar:
                     ax.set_xticklabels(cols_kpi)
                     ax.set_ylim(0, df_oee[cols_kpi].max().max() * 1.4)
                     ax.legend(bbox_to_anchor=(0.5, 1.20), loc='upper center', ncol=4, frameon=False, fontsize=8.5)
+                    
                     ax.spines['top'].set_visible(False)
                     ax.spines['right'].set_visible(False)
                     ax.grid(axis='y', linestyle='--', alpha=0.5)
+                    
                     plt.tight_layout()
                     plt.savefig('grafico_kpis.png', dpi=300, bbox_inches='tight')
                     plt.close()
@@ -332,8 +349,10 @@ if btn_generar:
                 try:
                     df_top_fallas['Falla_Completa'] = df_top_fallas.apply(lambda row: get_area(row['NombreFalla'], row['CategoriaPadre']) + ' - ' + str(row['NombreFalla']), axis=1)
                     df_top_fallas = df_top_fallas.sort_values('MinutosPerdidos', ascending=True)
+                    
                     fig, ax = plt.subplots(figsize=(7, 4))
                     barras = ax.barh(df_top_fallas['Falla_Completa'].str[:45], df_top_fallas['MinutosPerdidos'], color='#E67E22')
+                    
                     for barra in barras: 
                         ax.text(barra.get_width() + 5, barra.get_y() + barra.get_height()/2, f"{int(round(barra.get_width()))}m", va='center', ha='left', fontsize=9, color='black')
                     
@@ -342,6 +361,7 @@ if btn_generar:
                     ax.spines['bottom'].set_visible(False)
                     ax.set_xticks([])
                     ax.tick_params(axis='y', labelsize=8)
+                    
                     plt.tight_layout()
                     plt.savefig('grafico_top_fallas.png', dpi=300, bbox_inches='tight')
                     plt.close()
@@ -351,19 +371,29 @@ if btn_generar:
             if not df_tendencia.empty:
                 try:
                     df_tendencia['MAQUINA'] = df_tendencia['MAQUINA'].apply(formatear_nombre_maq)
-                    pivot_tendencia = df_tendencia.pivot(index='HORA', columns='MAQUINA', values='MinutosPerdidos').fillna(0)
+                    pivot_tendencia = df_tendencia.pivot(index='EJE_X', columns='MAQUINA', values='MinutosPerdidos').fillna(0)
+                    
                     fig, ax = plt.subplots(figsize=(7, 4))
                     for col in pivot_tendencia.columns: 
-                        ax.plot(pivot_tendencia.index, pivot_tendencia[col], marker='o', markersize=4, label=col, linewidth=1.5)
+                        ax.plot(range(len(pivot_tendencia.index)), pivot_tendencia[col], marker='o', markersize=4, label=col, linewidth=1.5)
                     
-                    ax.set_xticks(pivot_tendencia.index)
-                    ax.set_xticklabels([f"{int(h):02d}:00" for h in pivot_tendencia.index], fontsize=8, rotation=45)
-                    ax.set_ylabel('Min', fontsize=9)
+                    ax.set_xticks(range(len(pivot_tendencia.index)))
+                    
+                    if dias_diferencia > 3:
+                        labels = [pd.to_datetime(str(x)).strftime("%d/%m") for x in pivot_tendencia.index]
+                        ax.set_ylabel('Minutos por Día', fontsize=9)
+                    else:
+                        labels = [f"{int(x):02d}:00" for x in pivot_tendencia.index]
+                        ax.set_ylabel('Minutos por Hora', fontsize=9)
+                        
+                    ax.set_xticklabels(labels, fontsize=8, rotation=45)
                     ax.tick_params(axis='y', labelsize=8)
                     ax.legend(bbox_to_anchor=(0.5, 1.25), loc='upper center', ncol=2, frameon=False, fontsize=8)
+                    
                     ax.spines['top'].set_visible(False)
                     ax.spines['right'].set_visible(False)
                     ax.grid(color='lightgray', linestyle='-', linewidth=0.5, alpha=0.7)
+                    
                     plt.tight_layout()
                     plt.savefig('grafico_tendencia.png', dpi=300, bbox_inches='tight')
                     plt.close()
@@ -376,7 +406,6 @@ if btn_generar:
             COLOR_TITULO = (211, 84, 0)
             COLOR_GRIS = (100, 100, 100)
             COLOR_NEGRO = (0, 0, 0)
-            
             TARGETS = {'OEE': 80.0, 'DISPONIBILIDAD': 92.0, 'PERFORMANCE': 87.0, 'CALIDAD': 99.5}
 
             def obtener_color(valor, kpi_name):
@@ -405,11 +434,14 @@ if btn_generar:
                 def print_kpi(self, etiqueta, valor_num, kpi_name, separador=" | "):
                     color_dinamico = obtener_color(valor_num, kpi_name)
                     valor_txt = f"{valor_num:.1f}%" if not pd.isna(valor_num) else "0.0%"
+                    
                     self.set_font("Arial", 'B', 10)
                     self.set_text_color(*COLOR_NEGRO)
                     self.cell(self.get_string_width(etiqueta), 6, txt=etiqueta, ln=0)
+                    
                     self.set_text_color(*color_dinamico)
                     self.cell(self.get_string_width(valor_txt), 6, txt=valor_txt, ln=0)
+                    
                     self.set_text_color(*COLOR_NEGRO)
                     self.cell(self.get_string_width(separador), 6, txt=separador, ln=0)
 
@@ -461,11 +493,14 @@ if btn_generar:
             pdf.cell(0, 8, txt=">> 7. Distribución de Down Time por Área", ln=True, link=link_dt_area)
             pdf.cell(0, 8, txt=">> 8. Desglose de Producción", ln=True, link=link_prod)
             pdf.cell(0, 8, txt=">> 9. SECCIÓN FINAL: PERFORMANCE Y TIEMPOS", ln=True, link=link_final)
-            pdf.cell(0, 8, txt=">> 10. Anexo: Registro Diario Exacto de Apertura y Cierre", ln=True, link=link_anexo)
+            
+            if dias_diferencia <= 3:
+                pdf.cell(0, 8, txt=">> 10. Anexo: Registro Diario Exacto de Apertura y Cierre", ln=True, link=link_anexo)
 
             # --- PÁGINA 2 ---
             pdf.add_page()
             pdf.set_link(link_oee)
+            
             pdf.set_font("Arial", 'B', 14)
             pdf.set_text_color(*COLOR_TITULO)
             pdf.cell(120, 6, txt="SECCIÓN GRUPO: CELDA RENAULT", ln=0)
@@ -473,7 +508,7 @@ if btn_generar:
             pdf.set_draw_color(150, 150, 150)
             pdf.line(10, pdf.get_y()+8, 200, pdf.get_y()+8)
             pdf.ln(10)
-
+            
             pdf.set_font("Arial", 'B', 12)
             pdf.set_text_color(*COLOR_TITULO)
             pdf.cell(0, 6, txt="1. Resumen OEE del Grupo", ln=True)
@@ -513,6 +548,7 @@ if btn_generar:
                     pdf.ln(4) 
                     
                 pdf.ln(3)
+                
                 pdf.set_font("Arial", 'B', 12)
                 pdf.set_text_color(*COLOR_TITULO)
                 pdf.set_link(link_kpis)
@@ -527,7 +563,7 @@ if btn_generar:
 
             # --- SECCIÓN 3 ---
             pdf.ln(5)
-            if pdf.get_y() > 250:
+            if pdf.get_y() > 250: 
                 pdf.add_page()
                 
             if not df_turnos.empty:
@@ -552,19 +588,21 @@ if btn_generar:
                     pdf.cell(w, 5, h, border=1, fill=True, align='C')
                 
                 pdf.ln()
+                
                 pdf.set_text_color(*COLOR_NEGRO)
                 pdf.set_font("Arial", '', 8)
                 pdf.set_draw_color(210, 210, 210)
                 
                 fill_row = False
                 for _, fila in df_turnos.iterrows():
-                    if fill_row:
+                    if fill_row: 
                         pdf.set_fill_color(245, 248, 250)
-                    else:
+                    else: 
                         pdf.set_fill_color(255, 255, 255)
                         
                     maq_row = str(fila['MAQUINA'])
                     turno_row = str(fila['TURNO'])
+                    
                     bano_mins = bano_dict.get((maq_row, turno_row), 0)
                     refri_mins = refri_dict.get((maq_row, turno_row), 0)
                     
@@ -579,11 +617,12 @@ if btn_generar:
                     pdf.cell(cols_w3[5], 4.5, str_bano, border=1, fill=True, align='C')
                     pdf.cell(cols_w3[6], 4.5, str_refri, border=1, fill=True, align='C')
                     pdf.ln()
+                    
                     fill_row = not fill_row
 
             # --- SECCIÓN 4 ---
             pdf.ln(5)
-            if pdf.get_y() > 260:
+            if pdf.get_y() > 260: 
                 pdf.add_page()
                 
             pdf.set_font("Arial", 'B', 12)
@@ -605,6 +644,7 @@ if btn_generar:
                 pdf.cell(w_cat, 5, titulo, border=1, fill=True, align='C')
                 
             pdf.ln()
+            
             pdf.set_text_color(*COLOR_NEGRO)
             pdf.set_font("Arial", '', 8)
             pdf.set_draw_color(210, 210, 210)
@@ -617,7 +657,7 @@ if btn_generar:
 
             # --- SECCIÓN 5 ---
             pdf.ln(6)
-            if pdf.get_y() > 200:
+            if pdf.get_y() > 200: 
                 pdf.add_page()
                 
             pdf.set_font("Arial", 'B', 12)
@@ -637,21 +677,27 @@ if btn_generar:
             pdf.cell(90, 5, txt="> Top 15 Fallas:", ln=0)
             
             pdf.set_xy(105, y_actual)
-            pdf.cell(90, 5, txt="> Tendencia Fallas:", ln=1)
+            
+            if dias_diferencia > 3:
+                txt_tendencia = "> Tendencia Fallas por Día:"
+            else:
+                txt_tendencia = "> Tendencia Fallas por Hora:"
+                
+            pdf.cell(90, 5, txt=txt_tendencia, ln=1)
             
             y_graficos = pdf.get_y()
-            if os.path.exists('grafico_top_fallas.png'):
+            if os.path.exists('grafico_top_fallas.png'): 
                 pdf.image('grafico_top_fallas.png', x=10, y=y_graficos, w=92)
                 
-            if os.path.exists('grafico_tendencia.png'):
+            if os.path.exists('grafico_tendencia.png'): 
                 pdf.image('grafico_tendencia.png', x=105, y=y_graficos, w=92)
 
             # --- SECCIÓN 6 ---
             pdf.set_y(y_graficos + 60)
             pdf.ln(4)
-            if pdf.get_y() > 250:
+            if pdf.get_y() > 250: 
                 pdf.add_page()
-            
+                
             pdf.set_font("Arial", 'B', 12)
             pdf.set_text_color(*COLOR_TITULO)
             pdf.set_link(link_resumen_maq)
@@ -673,6 +719,7 @@ if btn_generar:
                 pdf.cell(w, 5, h, border=1, fill=True, align='C')
                 
             pdf.ln()
+            
             pdf.set_text_color(*COLOR_NEGRO)
             pdf.set_font("Arial", '', 6.5)
             pdf.set_draw_color(210, 210, 210)
@@ -686,7 +733,7 @@ if btn_generar:
                     pdf.set_draw_color(255, 255, 255)
                     pdf.set_font("Arial", 'B', 6.5)
                     
-                    for w, h in zip(cols_w, headers):
+                    for w, h in zip(cols_w, headers): 
                         pdf.cell(w, 5, h, border=1, fill=True, align='C')
                         
                     pdf.ln()
@@ -694,9 +741,9 @@ if btn_generar:
                     pdf.set_font("Arial", '', 6.5)
                     pdf.set_draw_color(210, 210, 210)
                     
-                if fill_row:
+                if fill_row: 
                     pdf.set_fill_color(245, 248, 250)
-                else:
+                else: 
                     pdf.set_fill_color(255, 255, 255)
                 
                 prod = min_a_hhmm_hs(resumen_maq_dict[m].get('Produccion', 0))
@@ -717,15 +764,14 @@ if btn_generar:
                 pdf.cell(cols_w[2], row_height, fallas, border=1, fill=True, align='C')
                 pdf.cell(cols_w[3], row_height, parada, border=1, fill=True, align='C')
                 pdf.cell(cols_w[4], row_height, descanso, border=1, fill=True, align='C')
-                
                 pdf.multi_cell(cols_w[5], line_height, top3_str, border=1, fill=True, align='L')
-                pdf.set_xy(x_start, y_start + row_height)
                 
+                pdf.set_xy(x_start, y_start + row_height)
                 fill_row = not fill_row
 
             # --- SECCIÓN 7 ---
             pdf.ln(6)
-            if pdf.get_y() > 240:
+            if pdf.get_y() > 240: 
                 pdf.add_page() 
                 
             pdf.set_font("Arial", 'B', 12)
@@ -755,7 +801,6 @@ if btn_generar:
             
             x_start = pdf.get_x()
             y_start = pdf.get_y()
-            
             pdf.multi_cell(cols_dt_w[0], 5, "MAQUINA\nTarget vs Real", border=1, fill=True, align='C') 
             
             for i, col_name in enumerate(headers_dt[1:]):
@@ -779,8 +824,8 @@ if btn_generar:
                     
                     x_start = pdf.get_x()
                     y_start = pdf.get_y()
-                    
                     pdf.multi_cell(cols_dt_w[0], 5, "MAQUINA\nTarget vs Real", border=1, fill=True, align='C') 
+                    
                     for i, col_name in enumerate(headers_dt[1:]):
                         x_col = x_start + cols_dt_w[0] + sum(cols_dt_w[1:i+1])
                         pdf.set_xy(x_col, y_start)
@@ -791,9 +836,9 @@ if btn_generar:
                     pdf.set_font("Arial", 'B', 8)
                     pdf.set_draw_color(210, 210, 210)
 
-                if fill_row:
+                if fill_row: 
                     pdf.set_fill_color(245, 248, 250)
-                else:
+                else: 
                     pdf.set_fill_color(255, 255, 255)
                 
                 apertura_total = apertura_mensual_dict.get(m, 0)
@@ -806,25 +851,25 @@ if btn_generar:
                     trg = TARGETS_DT[col_name]['TRG']
                     min_lim = TARGETS_DT[col_name]['MIN']
                     
-                    if porcentaje == 0.0:
+                    if porcentaje == 0.0: 
                         pdf.set_text_color(40, 167, 69)
-                    elif porcentaje <= trg:
+                    elif porcentaje <= trg: 
                         pdf.set_text_color(40, 167, 69)
-                    elif porcentaje >= min_lim:
+                    elif porcentaje >= min_lim: 
                         pdf.set_text_color(220, 53, 69)
-                    else:
+                    else: 
                         pdf.set_text_color(230, 126, 34)
                         
                     pdf.cell(cols_dt_w[i+1], 5.5, f"{porcentaje:.1f}% ({int(mins_area)}m)", border=1, fill=True, align='C')
-                    
+                
                 pdf.ln()
                 fill_row = not fill_row
 
             # --- SECCIÓN 8 ---
             pdf.ln(6)
-            if pdf.get_y() > 240:
+            if pdf.get_y() > 240: 
                 pdf.add_page()
-            
+                
             pdf.set_font("Arial", 'B', 12)
             pdf.set_text_color(*COLOR_TITULO)
             pdf.set_link(link_prod)
@@ -837,7 +882,7 @@ if btn_generar:
             if not df_top_prod.empty:
                 maquinas_prod = df_top_prod['MAQUINA'].unique()
                 for maq in sorted(maquinas_prod):
-                    if pdf.get_y() > 250:
+                    if pdf.get_y() > 250: 
                         pdf.add_page() 
                         
                     df_maq_prod = df_top_prod[df_top_prod['MAQUINA'] == maq]
@@ -855,9 +900,9 @@ if btn_generar:
                     pdf.set_draw_color(255, 255, 255)
                     pdf.set_font("Arial", 'B', 8)
                     
-                    for w, h in zip(cols_prod_w, headers_prod):
+                    for w, h in zip(cols_prod_w, headers_prod): 
                         pdf.cell(w, 5, h, border=1, fill=True, align='C')
-                    
+                        
                     pdf.ln()
                     pdf.set_text_color(*COLOR_NEGRO)
                     pdf.set_font("Arial", '', 7)
@@ -865,12 +910,13 @@ if btn_generar:
                     
                     fill_row = False
                     for _, row_prod in df_maq_prod.iterrows():
-                        if fill_row:
+                        if fill_row: 
                             pdf.set_fill_color(245, 248, 250)
-                        else:
+                        else: 
                             pdf.set_fill_color(255, 255, 255)
                         
                         tc_val = float(row_prod['TC']) if not pd.isna(row_prod['TC']) else 0.0
+                        
                         if tc_val > 0:
                             tc_str = f"{tc_val:.1f}" if tc_val.is_integer() else str(round(tc_val, 3))
                             pzs_h = int(60 / tc_val)
@@ -885,14 +931,16 @@ if btn_generar:
                         pdf.cell(cols_prod_w[4], 4.5, tc_str, border=1, fill=True, align='C')
                         pdf.cell(cols_prod_w[5], 4.5, str(pzs_h), border=1, fill=True, align='C')
                         pdf.ln()
+                        
                         fill_row = not fill_row
+                        
                     pdf.ln(3)
 
             # --- SECCIÓN 9: SECCIÓN FINAL (PERFORMANCE Y TIEMPOS) ---
             pdf.ln(6)
-            if pdf.get_y() > 240:
+            if pdf.get_y() > 240: 
                 pdf.add_page()
-            
+                
             pdf.set_font("Arial", 'B', 14)
             pdf.set_text_color(*COLOR_TITULO)
             pdf.set_link(link_final)
@@ -902,6 +950,7 @@ if btn_generar:
             pdf.line(10, pdf.get_y(), 200, pdf.get_y())
             pdf.ln(6)
 
+            # TABLA DE PERFORMANCE OPERARIOS
             if not df_perf_operarios.empty:
                 pdf.set_font("Arial", 'B', 12)
                 pdf.set_text_color(*COLOR_TITULO)
@@ -923,6 +972,7 @@ if btn_generar:
                     pdf.cell(w, 5, h, border=1, fill=True, align='C')
                     
                 pdf.ln()
+                
                 pdf.set_text_color(*COLOR_NEGRO)
                 pdf.set_font("Arial", '', 8)
                 pdf.set_draw_color(210, 210, 210)
@@ -936,7 +986,7 @@ if btn_generar:
                         pdf.set_draw_color(255, 255, 255)
                         pdf.set_font("Arial", 'B', 8)
                         
-                        for w, h in zip(cols_perf_w, headers_perf):
+                        for w, h in zip(cols_perf_w, headers_perf): 
                             pdf.cell(w, 5, h, border=1, fill=True, align='C')
                             
                         pdf.ln()
@@ -944,9 +994,9 @@ if btn_generar:
                         pdf.set_font("Arial", '', 8)
                         pdf.set_draw_color(210, 210, 210)
                         
-                    if fill_row:
+                    if fill_row: 
                         pdf.set_fill_color(245, 248, 250)
-                    else:
+                    else: 
                         pdf.set_fill_color(255, 255, 255)
                     
                     perf_val = row['Perf']
@@ -956,15 +1006,15 @@ if btn_generar:
                     pdf.cell(cols_perf_w[1], 5, str(row['Fabrica'])[:25], border=1, fill=True, align='C')
                     
                     maq_operadas = str(row['MaquinasOperadas'])
-                    if pd.isna(row['MaquinasOperadas']) or row['MaquinasOperadas'] == 'None':
+                    if pd.isna(row['MaquinasOperadas']) or row['MaquinasOperadas'] == 'None': 
                         maq_operadas = "-"
                         
                     maq_operadas = maq_operadas.replace('CELDA ', 'Celda 0').replace('CEL', 'Celda ')
                     pdf.cell(cols_perf_w[2], 5, maq_operadas[:40], border=1, fill=True, align='C')
                     
-                    if pd.notna(perf_val) and perf_val >= 100:
+                    if pd.notna(perf_val) and perf_val >= 100: 
                         pdf.set_text_color(40, 167, 69)
-                    else:
+                    else: 
                         pdf.set_text_color(220, 53, 69)
                         
                     pdf.cell(cols_perf_w[3], 5, perf_str, border=1, fill=True, align='C')
@@ -975,15 +1025,16 @@ if btn_generar:
                     
                 pdf.ln(8)
 
+            # TABLAS DE DESCANSOS ACUMULADOS
             if not df_desc_operarios.empty:
                 for tipo in ['BAÑO', 'REFRIGERIO']:
                     df_tipo = df_desc_operarios[df_desc_operarios['TipoDescanso'] == tipo]
-                    if df_tipo.empty:
+                    if df_tipo.empty: 
                         continue
 
-                    if pdf.get_y() > 250:
+                    if pdf.get_y() > 250: 
                         pdf.add_page()
-                    
+                        
                     pdf.set_font("Arial", 'B', 12)
                     pdf.set_text_color(*COLOR_TITULO)
                     titulo_tabla = f"Tiempo de {tipo.capitalize()} Acumulado"
@@ -1001,10 +1052,11 @@ if btn_generar:
                     pdf.set_draw_color(255, 255, 255)
                     pdf.set_font("Arial", 'B', 8)
                     
-                    for w, h in zip(cols_desc_w, headers_desc):
+                    for w, h in zip(cols_desc_w, headers_desc): 
                         pdf.cell(w, 5, h, border=1, fill=True, align='C')
                         
                     pdf.ln()
+                    
                     pdf.set_text_color(*COLOR_NEGRO)
                     pdf.set_font("Arial", '', 8)
                     pdf.set_draw_color(210, 210, 210)
@@ -1018,7 +1070,7 @@ if btn_generar:
                             pdf.set_draw_color(255, 255, 255)
                             pdf.set_font("Arial", 'B', 8)
                             
-                            for w, h in zip(cols_desc_w, headers_desc):
+                            for w, h in zip(cols_desc_w, headers_desc): 
                                 pdf.cell(w, 5, h, border=1, fill=True, align='C')
                                 
                             pdf.ln()
@@ -1026,9 +1078,9 @@ if btn_generar:
                             pdf.set_font("Arial", '', 8)
                             pdf.set_draw_color(210, 210, 210)
                             
-                        if fill_row:
+                        if fill_row: 
                             pdf.set_fill_color(245, 248, 250)
-                        else:
+                        else: 
                             pdf.set_fill_color(255, 255, 255)
                         
                         pdf.cell(cols_desc_w[0], 5, str(row['Operador'])[:35], border=1, fill=True, align='L')
@@ -1049,93 +1101,95 @@ if btn_generar:
                         
                     pdf.ln(8)
 
-            # --- SECCIÓN 10: ANEXO ---
-            if not df_horarios_diarios.empty:
-                pdf.ln(4)
-                if pdf.get_y() > 240:
-                    pdf.add_page()
-                    
-                pdf.set_font("Arial", 'B', 12)
-                pdf.set_text_color(*COLOR_TITULO)
-                pdf.set_link(link_anexo)
-                pdf.cell(0, 6, txt="10. Anexo: Registro Diario Exacto de Apertura y Cierre", ln=True)
-                
-                pdf.set_draw_color(*COLOR_TITULO)
-                pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-                pdf.ln(3)
-
-                turnos_unicos = sorted(df_horarios_diarios['TURNO'].dropna().unique())
-                cols_anexo_w = [25, 75, 45, 45]
-                headers_anexo = ["FECHA", "MAQUINA", "HORA EXACTA INICIO", "HORA EXACTA FIN"]
-
-                for turno in turnos_unicos:
-                    if pdf.get_y() > 255:
+            # --- SECCIÓN 10: ANEXO LÓGICA DINÁMICA ---
+            if dias_diferencia <= 3:
+                if not df_horarios_diarios.empty:
+                    pdf.ln(4)
+                    if pdf.get_y() > 240: 
                         pdf.add_page()
                         
-                    pdf.set_font("Arial", 'B', 10)
+                    pdf.set_font("Arial", 'B', 12)
                     pdf.set_text_color(*COLOR_TITULO)
-                    pdf.cell(0, 6, txt=f">> TABLA DEL TURNO {turno}", ln=True)
+                    pdf.set_link(link_anexo)
+                    pdf.cell(0, 6, txt="10. Anexo: Registro Diario Exacto de Apertura y Cierre", ln=True)
                     
-                    pdf.set_fill_color(211, 84, 0)
-                    pdf.set_text_color(255, 255, 255)
-                    pdf.set_draw_color(255, 255, 255)
-                    pdf.set_font("Arial", 'B', 8)
-                    
-                    for w, h in zip(cols_anexo_w, headers_anexo):
-                        pdf.cell(w, 5, h, border=1, fill=True, align='C')
-                        
-                    pdf.ln()
-                    pdf.set_text_color(*COLOR_NEGRO)
-                    pdf.set_font("Arial", '', 7)
-                    pdf.set_draw_color(210, 210, 210)
-                    
-                    df_turno = df_horarios_diarios[df_horarios_diarios['TURNO'] == turno].sort_values(by=['FECHA', 'MAQUINA'])
-                    fill_row = False
+                    pdf.set_draw_color(*COLOR_TITULO)
+                    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+                    pdf.ln(3)
 
-                    for _, row in df_turno.iterrows():
-                        if pdf.get_y() > 265:
+                    turnos_unicos = sorted(df_horarios_diarios['TURNO'].dropna().unique())
+                    cols_anexo_w = [25, 75, 45, 45]
+                    headers_anexo = ["FECHA", "MAQUINA", "HORA EXACTA INICIO", "HORA EXACTA FIN"]
+
+                    for turno in turnos_unicos:
+                        if pdf.get_y() > 255: 
                             pdf.add_page()
-                            pdf.set_font("Arial", 'B', 9)
-                            pdf.set_text_color(*COLOR_TITULO)
-                            pdf.cell(0, 6, txt=f">> TABLA DEL TURNO {turno} (Continuación)", ln=True)
                             
-                            pdf.set_fill_color(211, 84, 0)
-                            pdf.set_text_color(255, 255, 255)
-                            pdf.set_font("Arial", 'B', 8)
+                        pdf.set_font("Arial", 'B', 10)
+                        pdf.set_text_color(*COLOR_TITULO)
+                        pdf.cell(0, 6, txt=f">> TABLA DEL TURNO {turno}", ln=True)
+                        
+                        pdf.set_fill_color(211, 84, 0)
+                        pdf.set_text_color(255, 255, 255)
+                        pdf.set_draw_color(255, 255, 255)
+                        pdf.set_font("Arial", 'B', 8)
+                        
+                        for w, h in zip(cols_anexo_w, headers_anexo): 
+                            pdf.cell(w, 5, h, border=1, fill=True, align='C')
                             
-                            for w, h in zip(cols_anexo_w, headers_anexo):
-                                pdf.cell(w, 5, h, border=1, fill=True, align='C')
-                                
-                            pdf.ln()
-                            pdf.set_text_color(*COLOR_NEGRO)
-                            pdf.set_font("Arial", '', 7)
-                            pdf.set_draw_color(210, 210, 210)
-
-                        if fill_row:
-                            pdf.set_fill_color(245, 248, 250)
-                        else:
-                            pdf.set_fill_color(255, 255, 255)
-                            
-                        fecha_str = row['FECHA'].strftime("%d/%m/%Y")
-                        maq_str = formatear_nombre_maq(row['MAQUINA'])
-                        hora_inicio_str = row['HORA_INICIO'].strftime("%H:%M:%S") if not pd.isna(row['HORA_INICIO']) else "Sin Registro"
-                        hora_cierre_str = row['HORA_CIERRE'].strftime("%H:%M:%S") if not pd.isna(row['HORA_CIERRE']) else "Sin Registro"
-
-                        pdf.cell(cols_anexo_w[0], 4.5, fecha_str, border=1, fill=True, align='C')
-                        pdf.cell(cols_anexo_w[1], 4.5, maq_str, border=1, fill=True, align='L')
-                        pdf.cell(cols_anexo_w[2], 4.5, hora_inicio_str, border=1, fill=True, align='C')
-                        pdf.cell(cols_anexo_w[3], 4.5, hora_cierre_str, border=1, fill=True, align='C')
                         pdf.ln()
                         
-                        fill_row = not fill_row
+                        pdf.set_text_color(*COLOR_NEGRO)
+                        pdf.set_font("Arial", '', 7)
+                        pdf.set_draw_color(210, 210, 210)
                         
-                    pdf.ln(5) 
+                        df_turno = df_horarios_diarios[df_horarios_diarios['TURNO'] == turno].sort_values(by=['FECHA', 'MAQUINA'])
+                        fill_row = False
+
+                        for _, row in df_turno.iterrows():
+                            if pdf.get_y() > 265:
+                                pdf.add_page()
+                                pdf.set_font("Arial", 'B', 9)
+                                pdf.set_text_color(*COLOR_TITULO)
+                                pdf.cell(0, 6, txt=f">> TABLA DEL TURNO {turno} (Continuación)", ln=True)
+                                
+                                pdf.set_fill_color(211, 84, 0)
+                                pdf.set_text_color(255, 255, 255)
+                                pdf.set_font("Arial", 'B', 8)
+                                
+                                for w, h in zip(cols_anexo_w, headers_anexo): 
+                                    pdf.cell(w, 5, h, border=1, fill=True, align='C')
+                                    
+                                pdf.ln()
+                                pdf.set_text_color(*COLOR_NEGRO)
+                                pdf.set_font("Arial", '', 7)
+                                pdf.set_draw_color(210, 210, 210)
+
+                            if fill_row: 
+                                pdf.set_fill_color(245, 248, 250)
+                            else: 
+                                pdf.set_fill_color(255, 255, 255)
+                                
+                            fecha_str = row['FECHA'].strftime("%d/%m/%Y")
+                            maq_str = formatear_nombre_maq(row['MAQUINA'])
+                            hora_inicio_str = row['HORA_INICIO'].strftime("%H:%M:%S") if not pd.isna(row['HORA_INICIO']) else "Sin Registro"
+                            hora_cierre_str = row['HORA_CIERRE'].strftime("%H:%M:%S") if not pd.isna(row['HORA_CIERRE']) else "Sin Registro"
+
+                            pdf.cell(cols_anexo_w[0], 4.5, fecha_str, border=1, fill=True, align='C')
+                            pdf.cell(cols_anexo_w[1], 4.5, maq_str, border=1, fill=True, align='L')
+                            pdf.cell(cols_anexo_w[2], 4.5, hora_inicio_str, border=1, fill=True, align='C')
+                            pdf.cell(cols_anexo_w[3], 4.5, hora_cierre_str, border=1, fill=True, align='C')
+                            pdf.ln()
+                            
+                            fill_row = not fill_row
+                            
+                        pdf.ln(5) 
 
             nombre_pdf = f"Reporte_CELDA_RENAULT_{FECHA_INICIO}_al_{FECHA_FIN}.pdf"
             pdf.output(nombre_pdf)
-            
+
             st.success("✅ Procesamiento completado. El reporte está listo.")
-            
+
             with open(nombre_pdf, "rb") as pdf_file:
                 PDFbyte = pdf_file.read()
 
